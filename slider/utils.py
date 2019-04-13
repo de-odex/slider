@@ -1,4 +1,4 @@
-from functools import lru_cache
+from functools import lru_cache, partial
 
 
 class lazyval:
@@ -20,8 +20,26 @@ class lazyval:
         return value
 
     def __set__(self, instance, value):
+        getattr(self.__get__, "cache_clear", lambda: None)()
         vars(instance)[self._name] = value
 
+class lazymethod:
+    """Decorator to lazily compute a method. Assumes the method never accesses a
+    field that changes.
+    """
+    def __init__(self, fget):
+        self._fget = lru_cache(None)(fget)
+        self._name = None
+
+    def __call__(self, *args, **kwargs):
+        value = self._fget(*args, **kwargs)
+        return value
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+
+        return partial(self.__call__, instance)
 
 class no_default:
     """Sentinel type; this should not be instantiated.

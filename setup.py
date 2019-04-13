@@ -33,6 +33,7 @@ setup(
         'pytz',
         'requests',
         'scipy',
+        'tqdm',
         'toolz',
     ],
     extras_require={

@@ -1,3 +1,4 @@
+import asyncio
 from functools import lru_cache
 from hashlib import md5
 import os
@@ -106,6 +107,9 @@ class Library:
     def __exit__(self, *exc_info):
         self.close()
 
+    def __getitem__(self, item):
+        return self.lookup_by_id(item)
+
     @staticmethod
     def _osu_files(path, recurse):
         """An iterator of ``.osu`` filepaths in a directory.
@@ -122,16 +126,23 @@ class Library:
         path : str
             The path to a ``.osu`` file.
         """
+        pattern = "*.osu"
         if recurse:
-            for directory, _, filenames in os.walk(path):
-                for filename in filenames:
-                    if filename.endswith('.osu'):
-                        yield pathlib.Path(os.path.join(directory, filename))
-        else:
-            for entry in os.scandir(directory):
-                path = entry.path
-                if path.endswith('.osu'):
-                    yield pathlib.Path(path)
+            pattern = "**/" + pattern
+        yield from path.glob(pattern)
+
+    @staticmethod
+    def iterate_beatmaps(iter):
+        for path in iter:
+            with open(path, 'rb') as f:
+                data = f.read()
+            try:
+                beatmap_id = Beatmap.parse_id(data.decode('utf-8-sig'))
+                yield (beatmap_id, data, path)
+            except ValueError as e:
+                raise ValueError(f'failed to parse {path}') from e
+            except ZeroDivisionError:
+                pass
 
     @classmethod
     def create_db(cls,
@@ -172,25 +183,17 @@ class Library:
             pass
 
         self = cls(path, cache=cache, download_url=download_url)
-        write_to_db = self._write_to_db
 
         progress = maybe_show_progress(
-            self._osu_files(path, recurse=recurse),
+            list(self._osu_files(path, recurse=recurse)),
             show_progress,
-            label='Processing beatmaps: ',
-            item_show_func=lambda p: 'Done!' if p is None else str(p.stem),
+            desc='Processing beatmaps: ',
+            leave=False,
+            unit='beatmaps',
+            # item_show_func=lambda p: 'Done!' if p is None else str(p.stem),
         )
-        with self._db, progress as it:
-            for path in it:
-                with open(path, 'rb') as f:
-                    data = f.read()
-
-                try:
-                    beatmap = Beatmap.parse(data.decode('utf-8-sig'))
-                except ValueError as e:
-                    raise ValueError(f'failed to parse {path}') from e
-
-                write_to_db(beatmap, data, path)
+        with progress as iter:
+            self._write_iter_to_db(cls.iterate_beatmaps(iter))
 
         return self
 
@@ -344,7 +347,7 @@ class Library:
             The beatmap being stored.
         data : bytes
             The raw data for the beatmap
-        path : str
+        path : pathlib.Path
             The path to save
         """
         # save paths relative to ``self.path`` so a library can be relocated
@@ -354,13 +357,38 @@ class Library:
         beatmap_id = beatmap.beatmap_id
 
         try:
-            self._db.execute(
-                'INSERT INTO beatmaps VALUES (?,?,?)',
-                (beatmap_md5, beatmap_id, str(path)),
-            )
+            with self._db:
+                self._db.execute(
+                    'INSERT INTO beatmaps VALUES (?,?,?)',
+                    (beatmap_md5, beatmap_id, str(path)),
+                )
         except sqlite3.IntegrityError:
             # ignore duplicate beatmaps
             pass
+
+    def _write_iter_to_db(self, iterable):
+        """Write data to the database.
+
+        Parameters
+        ----------
+        iterable : iterable[tuple]
+            An iterable of beatmap-data-path tuples
+        """
+        with self._db:
+            for i in iterable:
+                try:
+                # save paths relative to ``self.path`` so a library can be relocated
+                # without requiring a rebuild
+                    path = i[2].relative_to(self.path)
+                    beatmap_md5 = md5(i[1]).hexdigest()
+                    beatmap_id = getattr(i[0], "beatmap_id", i[0])
+                    self._db.execute(
+                        'INSERT INTO beatmaps VALUES (?,?,?)',
+                        (beatmap_md5, beatmap_id, str(path)),
+                    )
+                except sqlite3.IntegrityError:
+                    # ignore duplicate beatmaps
+                    pass
 
     def download(self, beatmap_id, *, save=False):
         """Download a beatmap.

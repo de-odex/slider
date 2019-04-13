@@ -1,4 +1,4 @@
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 
 from .bit_enum import BitEnum
 
@@ -8,7 +8,7 @@ class Mod(BitEnum):
     """
     no_fail = 1
     easy = 1 << 1
-    no_video = 1 << 2  # not a mod anymore
+    touch_device = 1 << 2
     hidden = 1 << 3
     hard_rock = 1 << 4
     sudden_death = 1 << 5
@@ -33,11 +33,35 @@ class Mod(BitEnum):
     cinema = 1 << 22  # same as last_mod
     target_practice = 1 << 23
     key9 = 1 << 24
-    coop = 1 << 25
+    coop = 1 << 25  # key10
     key1 = 1 << 26
     key3 = 1 << 27
     key2 = 1 << 28
     scoreV2 = 1 << 29
+    key_mod = key1 | key2 | key3 | key4 | key5 | key6 | key7 | key8 | key9 | coop
+
+    @classmethod
+    def __get_mapping(cls):
+        return OrderedDict((
+            ('ez', cls.easy),
+            ('hr', cls.hard_rock),
+            ('ht', cls.half_time),
+            ('dt', cls.double_time),
+            ('hd', cls.hidden),
+            ('fl', cls.flashlight),
+            ('so', cls.spun_out),
+            ('nf', cls.no_fail),
+
+            ('1k', cls.key1),
+            ('2k', cls.key2),
+            ('3k', cls.key3),
+            ('4k', cls.key4),
+            ('5k', cls.key5),
+            ('6k', cls.key6),
+            ('7k', cls.key7),
+            ('8k', cls.key8),
+            ('9k', cls.key9),
+        ))
 
     @classmethod
     def parse(cls, cs):
@@ -57,16 +81,8 @@ class Mod(BitEnum):
             raise ValueError(f'malformed mods: {cs!r}')
 
         cs = cs.lower()
-        mapping = {
-            'ez': cls.easy,
-            'hr': cls.hard_rock,
-            'ht': cls.half_time,
-            'dt': cls.double_time,
-            'hd': cls.hidden,
-            'fl': cls.flashlight,
-            'so': cls.spun_out,
-            'nf': cls.no_fail,
-        }
+
+        mapping = cls.__get_mapping()
 
         mod = 0
         for n in range(0, len(cs), 2):
@@ -74,6 +90,32 @@ class Mod(BitEnum):
                 mod |= mapping[cs[n:n + 2]]
             except KeyError:
                 raise ValueError(f'unknown mod: {cs[n:n + 2]!r}')
+
+        return mod
+
+    @classmethod
+    def serialize(cls, mod_mask):
+        """Serialize a concatenated string of shortened mod names out of a mod mask.
+
+        Parameters
+        ----------
+        mod_mask : int
+            The mod mask.
+
+        Returns
+        -------
+        cs : str
+            The mod string.
+        """
+        if mod_mask >= 1 << 30:
+            raise ValueError(f'malformed mod mask: {mod_mask!r}')
+
+        mod = ""
+        for v, k in cls.__get_mapping().items():
+            if mod_mask & int(k) != 0:
+                mod += v
+        if not mod:
+            return "nm"
 
         return mod
 
@@ -232,3 +274,50 @@ def ms_300_to_od(ms):
     :func:`slider.mod.od_to_ms_300`
     """
     return (ms - 79.5) / -6
+
+
+def key_count(beatmap) -> int:
+    """Gets the key count of a beatmap
+
+    Parameters
+    ----------
+    beatmap : slider.Beatmap
+        The beatmap to get the key count of
+
+    Returns
+    -------
+    int
+        key count of the beatmap
+    """
+    percent = len(beatmap.hit_objects_no_circles) / len(beatmap.hit_objects)
+    if percent < 0.2:
+        return 7
+    if percent < 0.3 or round(beatmap.circle_size) >= 5:
+        return 7 if round(beatmap.overall_difficulty) > 5 else 6
+    if percent > 0.6:
+        return 5 if round(beatmap.overall_difficulty) > 4 else 4
+    return int(max(4, min(round(beatmap.overall_difficulty) + 1, 7)))
+
+
+def score_multiplier(original_key_count: int, mod_key_count: int) -> float:
+    """Gets the score multiplier of two key counts
+
+    Parameters
+    ----------
+    original_key_count : int
+        The base number of keys
+    mod_key_count : int
+        The number of keys which would manipulate the score multiplier
+
+    Returns
+    -------
+    float
+        score multiplier of the corresponding key counts
+    """
+    difference = 0  # if original less than modifying
+    if original_key_count == mod_key_count:
+        difference = -2.5
+    elif original_key_count > mod_key_count:
+        difference = original_key_count - mod_key_count
+
+    return -0.04 * difference + 0.9

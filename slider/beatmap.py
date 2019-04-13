@@ -11,7 +11,7 @@ import numpy as np
 
 from .game_mode import GameMode
 from .mod import ar_to_ms, ms_to_ar, circle_radius, od_to_ms_300, ms_300_to_od
-from .position import Position, Point
+from .position import Position, Tick
 from .utils import (
     accuracy as calculate_accuracy,
     lazyval,
@@ -84,7 +84,7 @@ class TimingPoint:
         """
         return type(self)(
             4 * self.offset / 3,
-            self.ms_per_beat if self.inherited else (4 * self.ms_per_beat / 3),
+            4 * self.ms_per_beat / 3,
             self.meter,
             self.sample_type,
             self.sample_set,
@@ -93,13 +93,14 @@ class TimingPoint:
             self.kiai_mode,
         )
 
+    @lazyval
     def double_time(self):
         """The ``TimingPoint`` as it would appear with
         :data:`~slider.mod.Mod.double_time` enabled.
         """
         return type(self)(
             2 * self.offset / 3,
-            self.ms_per_beat if self.inherited else (2 * self.ms_per_beat / 3),
+            2 * self.ms_per_beat / 3,
             self.meter,
             self.sample_type,
             self.sample_set,
@@ -111,22 +112,14 @@ class TimingPoint:
     @lazyval
     def bpm(self):
         """The bpm of this timing point.
-
-        If this is an inherited timing point this value will be None.
         """
         ms_per_beat = self.ms_per_beat
-        if ms_per_beat < 0:
-            return None
         return round(60000 / ms_per_beat)
 
     def __repr__(self):
-        if self.parent is None:
-            inherited = 'inherited '
-        else:
-            inherited = ''
         return (
             f'<{type(self).__qualname__}:'
-            f' {inherited}{self.offset.total_seconds() * 1000:g}ms>'
+            f' {"parent " if self.parent is None else ""}{self.offset.total_seconds() * 1000:g}ms>'
         )
 
     @classmethod
@@ -187,7 +180,7 @@ class TimingPoint:
             sample_set = int(_get(rest, 2, '0'))
         except ValueError:
             raise ValueError(
-                f'sample_set should be an int, got {sample_set!r}',
+                    f'sample_set should be an int, got {sample_set!r}',
             )
 
         try:
@@ -204,6 +197,9 @@ class TimingPoint:
             kiai_mode = bool(int(_get(rest, 5, '0')))
         except ValueError:
             raise ValueError(f'kiai_mode should be a bool, got {kiai_mode!r}')
+
+        if inherited:
+            ms_per_beat = round(parent.ms_per_beat * abs(ms_per_beat / 100), 5)
 
         return cls(
             offset=offset,
@@ -426,7 +422,7 @@ class Spinner(HitObject):
             raise ValueError('missing end_time')
 
         try:
-            end_time = timedelta(milliseconds=int(end_time))
+            end_time = int(end_time)
         except ValueError:
             raise ValueError(f'end_time should be an int, got {end_time!r}')
 
@@ -499,35 +495,45 @@ class Slider(HitObject):
         self.edge_sounds = edge_sounds
         self.edge_additions = edge_additions
 
-    @lazyval
+    def __repr__(self):
+        return (
+            f'<{type(self.curve).__qualname__} {type(self).__qualname__}:'
+            f' {self.position},'
+            f' {self.time.total_seconds() * 1000:g}ms,'
+            f' {self.repeat} repeats>'
+        )
+
+    # @lazyval
+    @property
     def tick_points(self):
         """The position and time of each slider tick.
         """
         repeat = self.repeat
-
-        time = self.time
-        repeat_duration = (self.end_time - time) / repeat
+        time = self.time  # initial base time
+        beats_per_repeat = self.num_beats / repeat
+        ticks_per_repeat = self.tick_rate * beats_per_repeat
+        beats_per_tick =  beats_per_repeat / ticks_per_repeat
+        repeat_duration = timedelta(milliseconds=beats_per_repeat
+                                                 * self.ms_per_beat)
 
         curve = self.curve
 
         pre_repeat_ticks = []
-        append_tick = pre_repeat_ticks.append
 
-        beats_per_repeat = self.num_beats / repeat
-        for t in orange(self.tick_rate, beats_per_repeat, self.tick_rate):
+        for t in orange(beats_per_tick, beats_per_repeat, beats_per_tick):
             pos = curve(t / beats_per_repeat)
             timediff = timedelta(milliseconds=t * self.ms_per_beat)
-            append_tick(Point(pos.x, pos.y, time + timediff))
+            pre_repeat_ticks.append(Tick(pos, time + timediff, self))
 
         pos = curve(1)
         timediff = repeat_duration
-        append_tick(Point(pos.x, pos.y, time + timediff))
+        pre_repeat_ticks.append(Tick(pos, time + timediff, self, is_note=True))
 
         repeat_ticks = [
-            Point(p.x, p.y, pre_repeat_tick.offset)
+            Tick(p, pre_repeat_tick.time, self, pre_repeat_tick.is_note)
             for pre_repeat_tick, p in zip(
                 pre_repeat_ticks,
-                chain(pre_repeat_ticks[-2::-1], [self.position])
+                chain(map(lambda x: getattr(x, 'position'), pre_repeat_ticks[-2::-1]), [self.position])
             )
         ]
 
@@ -538,7 +544,7 @@ class Slider(HitObject):
         return list(
             chain.from_iterable(
                 (
-                    Point(p.x, p.y, p.offset + n * repeat_duration)
+                    Tick(p.position, p.time + n * repeat_duration, self, p.is_note)
                     for p in tick_sequence
                 )
                 for n, tick_sequence in enumerate(tick_sequences)
@@ -663,7 +669,7 @@ class Slider(HitObject):
             tp = timing_points[0]
 
         if tp.parent is not None:
-            velocity_multiplier = -100 / tp.ms_per_beat
+            velocity_multiplier = tp.parent.ms_per_beat / tp.ms_per_beat
             ms_per_beat = tp.parent.ms_per_beat
         else:
             velocity_multiplier = 1
@@ -879,8 +885,8 @@ def _get_as_bool(groups, section, field, default=no_default):
 
     Returns
     -------
-    f : float
-        ``float(groups[section][field])`` or default if ``field` is not in
+    b : bool
+        ``bool(groups[section][field])`` or default if ``field` is not in
         ``groups[section]``.
     """
     v = _get_as_str(groups, section, field, default)
@@ -1230,7 +1236,8 @@ class Beatmap:
         self.slider_multiplier = slider_multiplier
         self.slider_tick_rate = slider_tick_rate
         self.timing_points = timing_points
-        self.hit_objects = hit_objects
+
+        self._hit_objects = hit_objects
 
         # cache the stars with different mod combinations
         self._stars_cache = {}
@@ -1290,7 +1297,7 @@ class Beatmap:
             bpm *= 0.75
         return bpm
 
-    def hp(self, *, easy=False, hard_rock=False):
+    def hp(self, *, scala=1.4, easy=False, hard_rock=False):
         """Compute the Health Drain (HP) value for different mods.
 
         Parameters
@@ -1305,14 +1312,14 @@ class Beatmap:
         hp : float
             The HP value.
         """
-        hp = self.circle_size
+        hp = self.hp_drain_rate
         if hard_rock:
-            hp = min(1.4 * hp, 10)
+            hp = min(scala * hp, 10)
         elif easy:
             hp /= 2
         return hp
 
-    def cs(self, *, easy=False, hard_rock=False):
+    def cs(self, *, scala=1.4, easy=False, hard_rock=False):
         """Compute the Circle Size (CS) value for different mods.
 
         Parameters
@@ -1329,13 +1336,14 @@ class Beatmap:
         """
         cs = self.circle_size
         if hard_rock:
-            cs = min(1.4 * cs, 10)
+            cs = min(scala * cs, 10)
         elif easy:
             cs /= 2
         return cs
 
     def od(self,
            *,
+           scala=1.4,
            easy=False,
            hard_rock=False,
            half_time=False,
@@ -1360,7 +1368,7 @@ class Beatmap:
         """
         od = self.overall_difficulty
         if hard_rock:
-            od = min(1.4 * od, 10)
+            od = min(scala * od, 10)
         elif easy:
             od /= 2
 
@@ -1373,6 +1381,7 @@ class Beatmap:
 
     def ar(self,
            *,
+           scala=1.4,
            easy=False,
            hard_rock=False,
            half_time=False,
@@ -1405,7 +1414,7 @@ class Beatmap:
         if easy:
             ar /= 2
         elif hard_rock:
-            ar = min(1.4 * ar, 10)
+            ar = min(scala * ar, 10)
 
         if double_time:
             ar = ms_to_ar(2 * ar_to_ms(ar) / 3)
@@ -1415,10 +1424,32 @@ class Beatmap:
         return ar
 
     @lazyval
+    @memoize
+    def hit_objects(self):
+        parse_hit_objects = partial(
+            HitObject.parse,
+            timing_points=self.timing_points,
+            slider_multiplier=self.slider_multiplier,
+            slider_tick_rate=self.slider_tick_rate,
+        )
+        ret = list(map(
+            parse_hit_objects,
+            self._hit_objects,
+        ))
+        del self._hit_objects
+        return ret
+
+    @lazyval
     def hit_objects_no_spinners(self):
         """The hit objects with spinners filtered out.
         """
         return tuple(e for e in self.hit_objects if not isinstance(e, Spinner))
+
+    @lazyval
+    def hit_objects_no_circles(self):
+        """The hit objects with circles filtered out.
+        """
+        return tuple(e for e in self.hit_objects if not isinstance(e, Circle))
 
     @lazyval
     def circles(self):
@@ -1544,7 +1575,7 @@ class Beatmap:
     })
 
     @classmethod
-    def _find_groups(cls, lines):
+    def _find_groups(cls, lines, until=None):
         """Split the input data into the named groups.
 
         Parameters
@@ -1595,6 +1626,10 @@ class Beatmap:
                 continue
 
             if line[0] == '[' and line[-1] == ']':
+                # break when we reach a group specified by `until`
+                if until and line[1:-1] == until:
+                    break
+
                 # we found a section header, commit the current buffered group
                 # and start the new group
                 commit_group()
@@ -1627,7 +1662,10 @@ class Beatmap:
         """
         data = data.lstrip()
         lines = iter(data.splitlines())
-        line = next(lines)
+        try:
+            line = next(lines)
+        except StopIteration:
+            raise ValueError(f'file is empty')
         match = cls._version_regex.match(line)
         if match is None:
             raise ValueError(f'missing osu file format specifier in: {line!r}')
@@ -1758,17 +1796,42 @@ class Beatmap:
             slider_multiplier=slider_multiplier,
             slider_tick_rate=slider_tick_rate,
             timing_points=timing_points,
-            hit_objects=list(map(
-                partial(
-                    HitObject.parse,
-                    timing_points=timing_points,
-                    slider_multiplier=slider_multiplier,
-                    slider_tick_rate=slider_tick_rate,
-                ),
-                groups['HitObjects'],
-            )),
+            hit_objects=groups['HitObjects'],
 
         )
+
+    @classmethod
+    def parse_id(cls, data):
+        """Partially parse a ``Beatmap`` from text in the ``.osu`` format.
+
+        Parameters
+        ----------
+        data : str
+            The data to parse.
+
+        Returns
+        -------
+        beatmap_id : int
+            The beatmap's id.
+
+        Raises
+        ------
+        ValueError
+            Raised when the data cannot be parsed in the ``.osu`` format.
+        """
+        data = data.lstrip()
+        lines = iter(data.splitlines())
+        try:
+            line = next(lines)
+        except StopIteration:
+            raise ValueError(f'file is empty')
+        match = cls._version_regex.match(line)
+        if match is None:
+            raise ValueError(f'missing osu file format specifier in: {line!r}')
+
+        groups = cls._find_groups(lines, until="Difficulty")
+
+        return _get_as_int(groups, 'Metadata', 'BeatmapID', None)
 
     def timing_point_at(self, time):
         """Get the :class:`slider.beatmap.TimingPoint` at the given time.

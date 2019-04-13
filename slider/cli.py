@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 
 import click
+from tqdm import tqdm
 
 
 def maybe_show_progress(it, show_progress, **kwargs):
@@ -29,7 +30,7 @@ def maybe_show_progress(it, show_progress, **kwargs):
                 ...
     """
     if show_progress:
-        return click.progressbar(it, **kwargs)
+        return tqdm(it, **kwargs)
 
     @contextmanager
     def ctx():
